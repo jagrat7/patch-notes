@@ -18,31 +18,34 @@ const entrySchema = z.object({
     .string()
     .min(1)
     .describe(
-      "One-line, reader-facing description of the change — what it means for " +
-        "the user, not the raw commit subject.",
+      "A clear, non-technical description of the change. Write for a " +
+        "non-technical customer. Avoid jargon, commit subjects, and internal " +
+        "terminology. Instead of 'refactored bottom bar event handler', write " +
+        "'The bottom bar is now clickable.'",
     ),
-  author: z.string().optional().describe("GitHub username or display name."),
-  prNumber: z.number().int().positive().optional().describe("Pull request number."),
-  prUrl: z.string().url().optional().describe("Link to the pull request."),
-  linearId: z
+  userImpact: z
     .string()
-    .optional()
-    .describe("Referenced Linear issue identifier, e.g. ENG-123."),
-  commitSha: z.string().optional().describe("Short commit SHA, if no PR."),
+    .min(1)
+    .describe(
+      "Explain how this change affects the user's workflow or experience. " +
+        "Be concrete and specific — describe what the user can now do that they " +
+        "couldn't before, or what feels different. E.g. 'You can now click the " +
+        "bottom bar to open the wallpaper currently on your screen, instead of " +
+        "navigating through the menu.'",
+    ),
 });
 
 export default defineTool({
   description:
     "Assemble grouped, reader-facing patch notes from changes the agent " +
-    "gathered from GitHub commits/PRs (and Linear issues). Returns both a " +
-    "structured object and rendered markdown. Read-only: it formats input you " +
-    "already collected and performs no external calls.",
+    "gathered from GitHub commits/PRs. Returns both a structured object and " +
+    "rendered markdown. Read-only: it formats input you already collected and " +
+    "performs no external calls.",
   inputSchema: z.object({
     repo: z
       .string()
       .min(1)
       .describe("Repository in owner/repo form, e.g. acme/web."),
-    branch: z.string().default("main").describe("Branch the changes are from."),
     range: z
       .string()
       .optional()
@@ -59,13 +62,12 @@ export default defineTool({
   }),
   outputSchema: z.object({
     repo: z.string(),
-    branch: z.string(),
     totalChanges: z.number(),
     markdown: z.string(),
   }),
-  async execute({ repo, branch, range, headline, entries }) {
+  async execute({ repo, range, headline, entries }) {
     const titleSuffix = range ? ` (${range})` : "";
-    const lines: string[] = [`## Patch Notes — ${repo}@${branch}${titleSuffix}`, ""];
+    const lines: string[] = [`## Patch Notes — ${repo}${titleSuffix}`, ""];
 
     if (headline) {
       lines.push(headline, "");
@@ -80,17 +82,8 @@ export default defineTool({
 
         lines.push(`### ${CATEGORY_HEADINGS[category]}`, "");
         for (const e of inCategory) {
-          const refs: string[] = [];
-          if (e.prNumber) {
-            refs.push(e.prUrl ? `[#${e.prNumber}](${e.prUrl})` : `#${e.prNumber}`);
-          } else if (e.commitSha) {
-            refs.push(`\`${e.commitSha}\``);
-          }
-          if (e.linearId) refs.push(e.linearId);
-          if (e.author) refs.push(`@${e.author}`);
-
-          const suffix = refs.length ? ` (${refs.join(", ")})` : "";
-          lines.push(`- ${e.summary}${suffix}`);
+          lines.push(`- **${e.summary}**`);
+          lines.push(`  ${e.userImpact}`);
         }
         lines.push("");
       }
@@ -98,7 +91,6 @@ export default defineTool({
 
     return {
       repo,
-      branch,
       totalChanges: entries.length,
       markdown: lines.join("\n").trimEnd(),
     };
