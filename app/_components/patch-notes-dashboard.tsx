@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { type FormEvent, useMemo, useState } from "react";
 import { AgentMessage } from "@/app/_components/agent-message";
+import { VideoPanel } from "@/app/_components/video-panel";
 import {
   Conversation,
   ConversationContent,
@@ -63,7 +64,7 @@ export function PatchNotesDashboard() {
   const agent = useEveAgent();
   const isBusy = agent.status === "submitted" || agent.status === "streaming";
 
-  const [repoInput, setRepoInput] = useState("vercel/next.js");
+  const [repoInput, setRepoInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [commits, setCommits] = useState<Commit[]>([]);
@@ -73,6 +74,10 @@ export function PatchNotesDashboard() {
   // Right panel mode: false = rendered document, true = chat thread.
   const [chatOpen, setChatOpen] = useState(false);
   const [refineInput, setRefineInput] = useState("");
+  // Whether "Generate" also renders a release video via the video-producer subagent.
+  const [withVideo, setWithVideo] = useState(true);
+  // Draft (fast, cheap on sandbox CPU) vs high quality. Draft-first by default.
+  const [hqVideo, setHqVideo] = useState(false);
 
   const allSelected = commits.length > 0 && selected.size === commits.length;
   const selectedCommits = useMemo(
@@ -128,17 +133,51 @@ export function PatchNotesDashboard() {
     if (selectedCommits.length === 0 || isBusy || !loadedRepo) return;
     setChatOpen(false); // a fresh generation returns to the document view
 
+    const [owner, repo] = loadedRepo.split("/");
+    const project = `${loadedRepo.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-${Date.now().toString(36)}`;
+
     const lines = selectedCommits.map((c) => {
       const pr = c.prNumber ? ` (PR #${c.prNumber})` : "";
       const author = c.author ? ` — ${c.author}` : "";
       return `- ${c.shortSha}: ${c.subject}${pr}${author}`;
     });
 
+    // Structured commits for the video-producer subagent (it can't see the prose above).
+    const videoCommits = selectedCommits.map((c) => ({
+      sha: c.sha,
+      subject: c.subject,
+      author: c.author,
+      authorLogin: c.authorLogin,
+    }));
+
     const message = [
       `Generate patch notes for ${loadedRepo} from exactly these ${selectedCommits.length} selected commits.`,
       "Do not fetch more commits; use only what I list here.",
       "",
       ...lines,
+      "",
+      ...(withVideo
+        ? [
+            "Also render a release video of these same changes in parallel:",
+            "delegate to the video-producer subagent in the SAME response as the",
+            "patch-notes tool call (do not wait for the video before showing notes).",
+            "Call video-producer with an outputSchema returning { url, durationSeconds, bytes },",
+            "and pass it this JSON in its message:",
+            "```json",
+            JSON.stringify(
+              {
+                owner,
+                repo,
+                project,
+                quality: hqVideo ? "high" : "draft",
+                commits: videoCommits,
+              },
+              null,
+              2,
+            ),
+            "```",
+          ]
+        : []),
     ].join("\n");
 
     await agent.send({ message });
@@ -195,14 +234,35 @@ export function PatchNotesDashboard() {
                 <Checkbox checked={allSelected} onCheckedChange={toggleAll} />
                 Select all
               </label>
-              <Button
-                disabled={selectedCommits.length === 0 || isBusy}
-                onClick={handleGenerate}
-                size="sm"
-              >
-                {isBusy && !chatOpen ? <Spinner /> : <SparklesIcon className="size-4" />}
-                Generate ({selectedCommits.length})
-              </Button>
+              <div className="flex items-center gap-3">
+                <label className="flex items-center gap-2 text-muted-foreground text-sm">
+                  <Checkbox
+                    checked={withVideo}
+                    onCheckedChange={(v) => setWithVideo(v === true)}
+                  />
+                  Video
+                </label>
+                {withVideo ? (
+                  <label
+                    className="flex items-center gap-2 text-muted-foreground text-sm"
+                    title="Draft renders fast and cheap; HQ is a slower, higher-quality pass."
+                  >
+                    <Checkbox
+                      checked={hqVideo}
+                      onCheckedChange={(v) => setHqVideo(v === true)}
+                    />
+                    HQ
+                  </label>
+                ) : null}
+                <Button
+                  disabled={selectedCommits.length === 0 || isBusy}
+                  onClick={handleGenerate}
+                  size="sm"
+                >
+                  {isBusy && !chatOpen ? <Spinner /> : <SparklesIcon className="size-4" />}
+                  Generate ({selectedCommits.length})
+                </Button>
+              </div>
             </div>
           ) : null}
 
@@ -269,15 +329,24 @@ export function PatchNotesDashboard() {
           {chatOpen ? (
             <ChatView agent={agent} isBusy={isBusy} />
           ) : (
-            <DocumentView
-              hasStarted={hasStarted}
-              isBusy={isBusy}
-              notes={notes}
-              onRefine={handleRefine}
-              refineInput={refineInput}
-              repo={loadedRepo}
-              setRefineInput={setRefineInput}
-            />
+            <>
+              <div className="flex min-h-0 flex-[1.4] flex-col">
+                <DocumentView
+                  hasStarted={hasStarted}
+                  isBusy={isBusy}
+                  notes={notes}
+                  onRefine={handleRefine}
+                  refineInput={refineInput}
+                  repo={loadedRepo}
+                  setRefineInput={setRefineInput}
+                />
+              </div>
+              {withVideo || hasStarted ? (
+                <div className="flex min-h-0 flex-1 flex-col">
+                  <VideoPanel data={agent.data} />
+                </div>
+              ) : null}
+            </>
           )}
         </section>
       </div>
