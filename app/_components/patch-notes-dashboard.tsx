@@ -10,14 +10,19 @@ import {
   AlertCircleIcon,
   ArrowLeftIcon,
   CheckIcon,
+  ClockIcon,
   CopyIcon,
   DownloadIcon,
   GitCommitHorizontalIcon,
   MessageSquareIcon,
+  SendIcon,
+  SettingsIcon,
   SparklesIcon,
 } from "lucide-react";
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentMessage } from "@/app/_components/agent-message";
+import { SendDialog } from "@/app/_components/send-dialog";
+import { type Settings, SettingsDialog } from "@/app/_components/settings-dialog";
 import {
   Conversation,
   ConversationContent,
@@ -27,6 +32,14 @@ import { MessageResponse } from "@/components/ai-elements/message";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
@@ -41,6 +54,25 @@ type Commit = {
   url: string;
   prNumber: number | null;
 };
+
+type Run = {
+  id: string;
+  repo: string;
+  branch: string;
+  headline: string | null;
+  markdown: string;
+  commitCount: number;
+  createdAt: string;
+};
+
+/** Pull a subject line out of the notes' headline for the email subject. */
+function deriveSubject(notes: string | null, repo: string | null): string {
+  if (notes) {
+    const heading = notes.split("\n").find((line) => /^#{1,3}\s+/.test(line));
+    if (heading) return heading.replace(/^#{1,3}\s+/, "").trim();
+  }
+  return repo ? `Patch Notes — ${repo}` : "Patch Notes";
+}
 
 /** Read the markdown off the most recent generate_patch_notes tool output. */
 function latestPatchNotes(messages: readonly EveMessage[]): string | null {
@@ -74,6 +106,46 @@ export function PatchNotesDashboard() {
   const [chatOpen, setChatOpen] = useState(false);
   const [refineInput, setRefineInput] = useState("");
 
+  // Persistence: shared settings + saved run history (Supabase).
+  const [settings, setSettings] = useState<Settings>({
+    defaultRepo: null,
+    recipients: [],
+    fromEmail: null,
+  });
+  const [runs, setRuns] = useState<Run[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sendOpen, setSendOpen] = useState(false);
+  // A run loaded from history overrides the live agent notes until cleared.
+  const [viewedRun, setViewedRun] = useState<Run | null>(null);
+
+  const refreshRuns = useCallback(async () => {
+    try {
+      const res = await fetch("/api/runs");
+      if (!res.ok) return;
+      const data = await res.json();
+      setRuns(data.runs ?? []);
+    } catch {
+      // Persistence is optional; ignore load failures.
+    }
+  }, []);
+
+  // On mount: load shared settings (default repo + recipients) and run history.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/settings");
+        if (res.ok) {
+          const data: Settings = await res.json();
+          setSettings(data);
+          if (data.defaultRepo) setRepoInput(data.defaultRepo);
+        }
+      } catch {
+        // ignore — settings are optional
+      }
+      await refreshRuns();
+    })();
+  }, [refreshRuns]);
+
   const allSelected = commits.length > 0 && selected.size === commits.length;
   const selectedCommits = useMemo(
     () => commits.filter((c) => selected.has(c.sha)),
@@ -82,6 +154,37 @@ export function PatchNotesDashboard() {
 
   const notes = latestPatchNotes(agent.data.messages);
   const hasStarted = agent.data.messages.length > 0;
+
+  // Auto-save each finished version of the notes to Supabase, once per change.
+  const savedNotesRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!notes || isBusy || !loadedRepo) return;
+    if (savedNotesRef.current === notes) return;
+    savedNotesRef.current = notes;
+    (async () => {
+      try {
+        await fetch("/api/runs", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            repo: loadedRepo,
+            headline: deriveSubject(notes, loadedRepo),
+            markdown: notes,
+            commits: selectedCommits.map((c) => ({
+              sha: c.sha,
+              shortSha: c.shortSha,
+              subject: c.subject,
+              author: c.author,
+              prNumber: c.prNumber,
+            })),
+          }),
+        });
+        await refreshRuns();
+      } catch {
+        // Persistence is optional.
+      }
+    })();
+  }, [notes, isBusy, loadedRepo, selectedCommits, refreshRuns]);
 
   async function handleFetch(event: FormEvent) {
     event.preventDefault();
@@ -127,6 +230,7 @@ export function PatchNotesDashboard() {
   async function handleGenerate() {
     if (selectedCommits.length === 0 || isBusy || !loadedRepo) return;
     setChatOpen(false); // a fresh generation returns to the document view
+    setViewedRun(null); // back to live agent output
 
     const lines = selectedCommits.map((c) => {
       const pr = c.prNumber ? ` (PR #${c.prNumber})` : "";
@@ -150,15 +254,71 @@ export function PatchNotesDashboard() {
     if (!text || isBusy) return;
     setRefineInput("");
     setChatOpen(true); // asking a follow-up opens the chat thread
+    setViewedRun(null); // refining acts on the live notes
     await agent.send({ message: text });
   }
+
+  // Re-open a past run as the document (read-only view of saved markdown).
+  function loadRun(run: Run) {
+    setChatOpen(false);
+    setLoadedRepo(run.repo);
+    savedNotesRef.current = run.markdown; // don't re-save what we just loaded
+    setViewedRun(run);
+  }
+
+  const displayNotes = viewedRun ? viewedRun.markdown : notes;
 
   return (
     <main className="flex h-dvh flex-col overflow-hidden bg-background text-foreground">
       <header className="flex shrink-0 flex-col gap-3 border-b px-4 py-3 sm:px-6">
-        <div className="flex items-center gap-2">
-          <SparklesIcon className="size-5 text-primary" />
-          <h1 className="font-medium text-lg tracking-tight">Patch Notes</h1>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <SparklesIcon className="size-5 text-primary" />
+            <h1 className="font-medium text-lg tracking-tight">Patch Notes</h1>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" variant="outline">
+                  <ClockIcon className="size-4" />
+                  History
+                  {runs.length > 0 ? (
+                    <Badge variant="secondary">{runs.length}</Badge>
+                  ) : null}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-80">
+                <DropdownMenuLabel>Saved runs</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {runs.length === 0 ? (
+                  <div className="px-2 py-3 text-muted-foreground text-sm">
+                    No saved runs yet. Generate patch notes to see them here.
+                  </div>
+                ) : (
+                  runs.map((run) => (
+                    <DropdownMenuItem
+                      className="flex flex-col items-start gap-0.5"
+                      key={run.id}
+                      onClick={() => loadRun(run)}
+                    >
+                      <span className="truncate font-medium text-sm">
+                        {run.headline ?? run.repo}
+                      </span>
+                      <span className="text-muted-foreground text-xs">
+                        {run.repo} · {run.commitCount} commit
+                        {run.commitCount === 1 ? "" : "s"} ·{" "}
+                        {new Date(run.createdAt).toLocaleString()}
+                      </span>
+                    </DropdownMenuItem>
+                  ))
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Button onClick={() => setSettingsOpen(true)} size="sm" variant="outline">
+              <SettingsIcon className="size-4" />
+              Settings
+            </Button>
+          </div>
         </div>
         <form className="flex flex-wrap items-center gap-2" onSubmit={handleFetch}>
           <Input
@@ -248,8 +408,11 @@ export function PatchNotesDashboard() {
         {/* Right: patch notes — document view by default, chat when refining */}
         <section className="flex min-h-0 flex-col">
           <div className="flex items-center justify-between gap-2 border-b px-4 py-2">
-            <span className="font-medium text-sm">
+            <span className="flex items-center gap-2 font-medium text-sm">
               {chatOpen ? "Refining patch notes" : "Patch notes"}
+              {!chatOpen && viewedRun ? (
+                <Badge variant="secondary">saved run</Badge>
+              ) : null}
             </span>
             {chatOpen ? (
               <Button onClick={() => setChatOpen(false)} size="sm" variant="ghost">
@@ -272,8 +435,10 @@ export function PatchNotesDashboard() {
             <DocumentView
               hasStarted={hasStarted}
               isBusy={isBusy}
-              notes={notes}
+              notes={displayNotes}
               onRefine={handleRefine}
+              onSend={() => setSendOpen(true)}
+              readOnly={viewedRun !== null}
               refineInput={refineInput}
               repo={loadedRepo}
               setRefineInput={setRefineInput}
@@ -281,6 +446,22 @@ export function PatchNotesDashboard() {
           )}
         </section>
       </div>
+
+      <SettingsDialog
+        onOpenChange={setSettingsOpen}
+        onSaved={setSettings}
+        open={settingsOpen}
+        settings={settings}
+      />
+      <SendDialog
+        defaultSubject={deriveSubject(displayNotes, loadedRepo)}
+        initialRecipients={settings.recipients}
+        markdown={displayNotes}
+        onOpenChange={setSendOpen}
+        onSent={refreshRuns}
+        open={sendOpen}
+        runId={viewedRun?.id ?? null}
+      />
     </main>
   );
 }
@@ -290,6 +471,8 @@ function DocumentView({
   isBusy,
   notes,
   onRefine,
+  onSend,
+  readOnly,
   refineInput,
   repo,
   setRefineInput,
@@ -298,6 +481,8 @@ function DocumentView({
   readonly isBusy: boolean;
   readonly notes: string | null;
   readonly onRefine: (event: FormEvent) => void;
+  readonly onSend: () => void;
+  readonly readOnly: boolean;
   readonly refineInput: string;
   readonly repo: string | null;
   readonly setRefineInput: (value: string) => void;
@@ -341,6 +526,10 @@ function DocumentView({
             <DownloadIcon className="size-4" />
             Download .md
           </Button>
+          <Button onClick={onSend} size="sm">
+            <SendIcon className="size-4" />
+            Send email
+          </Button>
         </div>
       ) : null}
 
@@ -366,7 +555,7 @@ function DocumentView({
         </div>
       </ScrollArea>
 
-      {notes ? (
+      {notes && !readOnly ? (
         <form className="flex items-center gap-2 border-t px-4 py-3" onSubmit={onRefine}>
           <MessageSquareIcon className="size-4 shrink-0 text-muted-foreground" />
           <Input
