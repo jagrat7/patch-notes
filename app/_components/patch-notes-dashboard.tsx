@@ -9,6 +9,9 @@ import {
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
+  CheckIcon,
+  CopyIcon,
+  DownloadIcon,
   GitCommitHorizontalIcon,
   MessageSquareIcon,
   SparklesIcon,
@@ -272,6 +275,7 @@ export function PatchNotesDashboard() {
               notes={notes}
               onRefine={handleRefine}
               refineInput={refineInput}
+              repo={loadedRepo}
               setRefineInput={setRefineInput}
             />
           )}
@@ -287,6 +291,7 @@ function DocumentView({
   notes,
   onRefine,
   refineInput,
+  repo,
   setRefineInput,
 }: {
   readonly hasStarted: boolean;
@@ -294,10 +299,51 @@ function DocumentView({
   readonly notes: string | null;
   readonly onRefine: (event: FormEvent) => void;
   readonly refineInput: string;
+  readonly repo: string | null;
   readonly setRefineInput: (value: string) => void;
 }) {
+  const [copied, setCopied] = useState(false);
+
+  async function handleCopy() {
+    if (!notes) return;
+    try {
+      await navigator.clipboard.writeText(notes);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  function handleDownload() {
+    if (!notes) return;
+    const slug = (repo ?? "patch-notes").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+    const blob = new Blob([notes], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${slug}-patch-notes.md`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <>
+      {notes ? (
+        <div className="flex items-center justify-end gap-2 border-b px-4 py-2">
+          <Button onClick={handleCopy} size="sm" variant="outline">
+            {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}
+            {copied ? "Copied" : "Copy markdown"}
+          </Button>
+          <Button onClick={handleDownload} size="sm" variant="outline">
+            <DownloadIcon className="size-4" />
+            Download .md
+          </Button>
+        </div>
+      ) : null}
+
       <ScrollArea className="min-h-0 flex-1">
         <div className="px-6 py-6">
           {notes ? (
